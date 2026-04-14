@@ -520,7 +520,9 @@ export default function Page() {
         {sidebarSections.api ? (
          <div id="studio-card-api" className="studio-card-body">
           <label className="studio-field">
-           <span className="studio-label">Gemini API Keys</span>
+           <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noreferrer" className="studio-api-link">
+            Gemini API 키 발급하러 가기
+           </a>
            <div className="studio-input-shell studio-input-shell-textarea">
             <textarea
              value={apiKeyInput}
