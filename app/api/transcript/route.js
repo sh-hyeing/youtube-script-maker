@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { fetchTranscript, listLanguages } from "youtube-transcript-plus";
+import { ProxyAgent } from "undici";
+
+export const runtime = "nodejs";
 
 function normalizeYoutubeUrl(input) {
  const value = String(input || "").trim();
@@ -59,6 +62,38 @@ function extractVideoId(input) {
  return videoId;
 }
 
+const proxyUrl = process.env.YOUTUBE_PROXY_URL || "";
+const proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
+
+function getFetchOptions(lang) {
+ return {
+  headers: {
+   "User-Agent":
+    process.env.YOUTUBE_TRANSCRIPT_USER_AGENT ||
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+   "Accept-Language": lang ? `${lang},en;q=0.9` : "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+   "Cache-Control": "no-cache",
+   Pragma: "no-cache",
+  },
+  cache: "no-store",
+  ...(proxyAgent ? { dispatcher: proxyAgent } : {}),
+ };
+}
+
+async function proxyAwareFetch(url, init = {}, lang) {
+ const mergedHeaders = {
+  ...(getFetchOptions(lang).headers || {}),
+  ...(init.headers || {}),
+ };
+
+ return fetch(url, {
+  ...init,
+  ...getFetchOptions(lang),
+  headers: mergedHeaders,
+ });
+}
+
 function createRequestInit(lang) {
  const userAgent =
   process.env.YOUTUBE_TRANSCRIPT_USER_AGENT ||
@@ -67,48 +102,61 @@ function createRequestInit(lang) {
  return {
   userAgent,
   retries: 3,
-  retryDelay: 800,
+  retryDelay: 1000,
   lang,
   videoFetch: async ({ url, userAgent: runtimeUserAgent }) => {
-   return fetch(url, {
-    headers: {
-     "User-Agent": runtimeUserAgent || userAgent,
-     "Accept-Language": lang ? `${lang},en;q=0.9` : "en-US,en;q=0.9,ko;q=0.8",
-     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-     "Cache-Control": "no-cache",
-     Pragma: "no-cache",
+   return proxyAwareFetch(
+    url,
+    {
+     method: "GET",
+     headers: {
+      "User-Agent": runtimeUserAgent || userAgent,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+     },
     },
-    next: { revalidate: 0 },
-   });
+    lang,
+   );
   },
   playerFetch: async ({ url, method, body, headers, userAgent: runtimeUserAgent }) => {
-   return fetch(url, {
-    method,
-    headers: {
-     ...headers,
-     "User-Agent": runtimeUserAgent || userAgent,
-     "Accept-Language": lang ? `${lang},en;q=0.9` : "en-US,en;q=0.9,ko;q=0.8",
-     Accept: "application/json,text/plain,*/*",
-     "Cache-Control": "no-cache",
-     Pragma: "no-cache",
+   return proxyAwareFetch(
+    url,
+    {
+     method,
+     body,
+     headers: {
+      ...headers,
+      "User-Agent": runtimeUserAgent || userAgent,
+      Accept: "application/json,text/plain,*/*",
+     },
     },
-    body,
-    next: { revalidate: 0 },
-   });
+    lang,
+   );
   },
   transcriptFetch: async ({ url, userAgent: runtimeUserAgent }) => {
-   return fetch(url, {
-    headers: {
-     "User-Agent": runtimeUserAgent || userAgent,
-     "Accept-Language": lang ? `${lang},en;q=0.9` : "en-US,en;q=0.9,ko;q=0.8",
-     Accept: "application/json,text/xml,application/xml;q=0.9,*/*;q=0.8",
-     "Cache-Control": "no-cache",
-     Pragma: "no-cache",
+   return proxyAwareFetch(
+    url,
+    {
+     method: "GET",
+     headers: {
+      "User-Agent": runtimeUserAgent || userAgent,
+      Accept: "application/json,text/xml,application/xml;q=0.9,*/*;q=0.8",
+     },
     },
-    next: { revalidate: 0 },
-   });
+    lang,
+   );
   },
  };
+}
+
+async function fetchTranscriptOnce(videoIdOrUrl, lang) {
+ const result = await fetchTranscript(videoIdOrUrl, createRequestInit(lang));
+ const segments = Array.isArray(result) ? result : result?.segments;
+
+ if (Array.isArray(segments) && segments.length > 0) {
+  return { transcript: segments, lang: lang || "auto", via: proxyAgent ? "proxy" : "direct" };
+ }
+
+ throw new Error("EMPTY_TRANSCRIPT");
 }
 
 async function fetchTranscriptWithFallback(videoIdOrUrl) {
@@ -117,15 +165,11 @@ async function fetchTranscriptWithFallback(videoIdOrUrl) {
 
  for (const lang of candidates) {
   try {
-   const result = await fetchTranscript(videoIdOrUrl, createRequestInit(lang));
-   const segments = Array.isArray(result) ? result : result?.segments;
-
-   if (Array.isArray(segments) && segments.length > 0) {
-    return { transcript: segments, lang: lang || "auto" };
-   }
+   return await fetchTranscriptOnce(videoIdOrUrl, lang);
   } catch (error) {
    errors.push({
     lang: lang || "auto",
+    via: proxyAgent ? "proxy" : "direct",
     message: error instanceof Error ? error.message : "UNKNOWN_ERROR",
    });
   }
@@ -134,31 +178,31 @@ async function fetchTranscriptWithFallback(videoIdOrUrl) {
  let availableLanguages = [];
 
  try {
-  availableLanguages = await listLanguages(videoIdOrUrl);
- } catch {}
+  availableLanguages = await listLanguages(videoIdOrUrl, createRequestInit(undefined));
+ } catch (error) {
+  errors.push({
+   lang: "listLanguages",
+   via: proxyAgent ? "proxy" : "direct",
+   message: error instanceof Error ? error.message : "UNKNOWN_ERROR",
+  });
+ }
 
  const availableCodes = Array.isArray(availableLanguages) ? availableLanguages.map((item) => item.languageCode).filter(Boolean) : [];
 
- if (availableCodes.length > 0) {
-  for (const lang of availableCodes.slice(0, 5)) {
-   try {
-    const result = await fetchTranscript(videoIdOrUrl, createRequestInit(lang));
-    const segments = Array.isArray(result) ? result : result?.segments;
-
-    if (Array.isArray(segments) && segments.length > 0) {
-     return { transcript: segments, lang };
-    }
-   } catch (error) {
-    errors.push({
-     lang,
-     message: error instanceof Error ? error.message : "UNKNOWN_ERROR",
-    });
-   }
+ for (const lang of availableCodes.slice(0, 5)) {
+  try {
+   return await fetchTranscriptOnce(videoIdOrUrl, lang);
+  } catch (error) {
+   errors.push({
+    lang,
+    via: proxyAgent ? "proxy" : "direct",
+    message: error instanceof Error ? error.message : "UNKNOWN_ERROR",
+   });
   }
  }
 
  const finalError = new Error("TRANSCRIPT_FETCH_FAILED");
- finalError.cause = { errors, availableCodes };
+ finalError.cause = { errors };
  throw finalError;
 }
 
@@ -249,7 +293,7 @@ export async function POST(req) {
   }
 
   const videoId = extractVideoId(normalizedUrl);
-  const { transcript, lang } = await fetchTranscriptWithFallback(videoId);
+  const { transcript, lang, via } = await fetchTranscriptWithFallback(videoId);
 
   if (!Array.isArray(transcript) || transcript.length === 0) {
    return NextResponse.json({ error: "자막 데이터가 비어 있습니다." }, { status: 404 });
@@ -269,6 +313,7 @@ export async function POST(req) {
     transcriptChunks,
     chunkCount: transcriptChunks.length,
     detectedLang: lang,
+    fetchedVia: via,
    },
    { status: 200 },
   );
@@ -278,7 +323,7 @@ export async function POST(req) {
 
   return NextResponse.json(
    {
-    error: "자막을 가져오지 못했습니다. 자막이 비활성화된 영상이거나 Vercel 같은 클라우드 환경에서 요청이 차단되었을 수 있습니다.",
+    error: "자막을 가져오지 못했습니다. 자막이 비활성화된 영상이거나 클라우드 환경 요청이 차단되었을 수 있습니다.",
     details,
     diagnostics: cause,
    },
