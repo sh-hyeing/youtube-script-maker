@@ -462,7 +462,7 @@ export default function Page() {
         <span />
         <span />
        </div>
-       <div className="studio-title">Script Macker</div>
+       <div className="studio-title">Youtube Script Maker</div>
       </div>
       <div className="studio-meta">YouTube → Transcript → Study Script</div>
      </header>
@@ -677,11 +677,8 @@ export default function Page() {
           </div>
 
           <div className="studio-error">
-           <p>
-            여러 API 키가 서로 다른 프로젝트에서 발급되었더라도, 같은 시점에 각 프로젝트의 무료 요청 한도에 동시에 걸리면 즉시 처리되지 않을 수
-            있습니다.
-           </p>
-           <p>이 경우 응답에 포함된 재시도 시간을 읽어서, 잠시 대기한 뒤 같은 청크부터 자동으로 이어서 시도합니다.</p>
+           <p>여러 API 키를 등록해도 무료 사용 한도에 동시에 도달하면 바로 처리되지 않을 수 있습니다.</p>
+           <p>이 경우 잠시 대기한 뒤, 중단된 지점부터 자동으로 다시 시작합니다.</p>
           </div>
 
           {errorMessage ? <div className="studio-error">{errorMessage}</div> : null}
