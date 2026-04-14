@@ -1,36 +1,75 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🎬 YouTube Script Maker
 
-## Getting Started
+YouTube Script Maker는 유튜브 영상 자막을 불러와, 내용을 정리하고 영어/한국어 학습용 스크립트로 가공해주는 웹 기반 학습 도구입니다.
 
-First, run the development server:
+긴 영상 자막을 그대로 읽기 어렵다는 문제를 줄이고 사용자가 더 쉽게 복습하고 정리할 수 있도록 **자막 추출 → 텍스트 정리 → 스크립트 생성 → PDF 저장** 흐름을 한 번에 처리할 수 있도록 만들었습니다.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## ✨ 핵심 기능
+
+### 📺 유튜브 자막 자동 추출
+
+유튜브 링크를 입력하면 `/api/transcript`를 통해 자막을 불러옵니다.  
+영상 자막을 타임스탬프 기준으로 정리하고, 긴 텍스트는 후속 처리에 맞게 자동으로 분할합니다.
+
+### 🤖 Gemini 기반 학습 스크립트 생성
+
+가져온 자막을 바탕으로 내용을 정리하고 영어/한국어 학습용 스크립트 형태로 재구성합니다.  
+긴 자막도 청크 단위로 처리하여 안정적으로 이어서 생성할 수 있도록 구성했습니다.
+
+### 🔁 다중 API 키 회전 처리
+
+Gemini API 키를 여러 개 등록해둘 수 있으며 요청 시 키를 순환 사용하도록 구현했습니다.  
+사용 중인 키와 대기 중인 키를 구분해서 보여주며, 키별 사용 흐름을 UI에서 확인할 수 있습니다.
+
+### ⏸️ 중단 / 이어하기 지원
+
+스크립트 생성 도중 작업을 멈출 수 있고 다시 이어서 진행할 수 있습니다.  
+긴 영상이나 자막이 많은 경우에도 작업 흐름을 끊지 않고 이어서 처리할 수 있습니다.
+
+### ⏳ quota exceeded 자동 재시도
+
+Gemini 응답에 `Please retry in XXs`가 포함되면 남은 시간을 읽어 자동 카운트다운 후 같은 지점부터 재시도합니다.  
+사용자는 현재 상태, 진행 위치, 자동 재시도까지 남은 시간을 STATUS 영역에서 확인할 수 있습니다.
+
+### 📄 PDF 다운로드
+
+완성된 학습 스크립트를 PDF로 저장할 수 있습니다.  
+한글 폰트 임베딩을 전제로 한 **교재형 레이아웃**으로 구성해, 복습 자료처럼 보관하거나 출력하기 좋게 만들었습니다.
+
+### 📱 모바일 친화적 UI
+
+모바일에서는 `VIDEO / API / VIEW / STATUS` 영역을 접고 펼칠 수 있도록 구성하고,  
+Study Script 본문은 내부 박스 스크롤보다 **페이지 전체를 자연스럽게 길게 읽는 방식**으로 볼 수 있도록 정리했습니다.
+
+---
+
+## 🛠️ 기술 스택
+
+### Frontend
+
+- Next.js
+- React
+- TypeScript
+- CSS
+
+### API / Processing
+
+- Gemini API
+- YouTube Transcript 처리 (`/api/transcript`)
+
+### Libraries
+
+- `jspdf`
+- `youtube-transcript`
+
+---
+
+## 🚀 사용 방법
+
+### 1. 프로젝트 설치
+
+저장소를 클론한 뒤 의존성을 설치합니다.
+
+```bash id="9y3c5m"
+npm install
 ```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
