@@ -76,43 +76,60 @@ export const transcribeAudioWithGemini = async ({ audioUrl, apiKey, titleHint = 
   });
  }
 
- const uploadedFile = await uploadFileToGemini({
-  audioBlob,
-  mimeType,
-  apiKey,
-  displayName: extractFileName(audioUrl),
-  signal,
- });
-
- try {
-  await waitForFileReady({
-   name: uploadedFile.name,
+ for (let attempt = 0; attempt < 2; attempt += 1) {
+  const uploadedFile = await uploadFileToGemini({
+   audioBlob,
+   mimeType,
    apiKey,
+   displayName: extractFileName(audioUrl),
    signal,
   });
 
-  return runWithModelFallbackAndRetry({
-   models,
-   signal,
-   onStatusChange,
-   runner: async (currentModel) => {
-    return requestUploadedAudioTranscript({
-     fileUri: uploadedFile.uri,
-     mimeType: uploadedFile.mimeType,
-     apiKey,
-     model: currentModel,
-     titleHint,
-     signal,
-    });
-   },
-  });
- } finally {
-  await deleteGeminiFile({
-   name: uploadedFile.name,
-   apiKey,
-   signal,
-  }).catch(() => {});
+  try {
+   await waitForFileReady({
+    name: uploadedFile.name,
+    apiKey,
+    signal,
+   });
+
+   return await runWithModelFallbackAndRetry({
+    models,
+    signal,
+    onStatusChange,
+    runner: async (currentModel) => {
+     return requestUploadedAudioTranscript({
+      fileUri: uploadedFile.uri,
+      mimeType: uploadedFile.mimeType,
+      apiKey,
+      model: currentModel,
+      titleHint,
+      signal,
+     });
+    },
+   });
+  } catch (error) {
+   if (error instanceof DOMException && error.name === "AbortError") {
+    throw error;
+   }
+
+   const message = error instanceof Error ? error.message : "";
+
+   if (!isFilePermissionError(message) || attempt === 1) {
+    throw error;
+   }
+
+   onStatusChange?.("파일 접근 오류로 재업로드 후 재시도 중");
+   await sleep(1500);
+  } finally {
+   await deleteGeminiFile({
+    name: uploadedFile.name,
+    apiKey,
+    signal,
+   }).catch(() => {});
+  }
  }
+
+ throw new Error("Gemini Files 처리에 실패했습니다.");
 };
 
 const runWithModelFallbackAndRetry = async ({
@@ -402,6 +419,8 @@ const waitForFileReady = async ({ name, apiKey, signal }: { name: string; apiKey
 
   await sleep(1500);
  }
+
+ throw new Error("Gemini Files 준비 시간이 초과되었습니다.");
 };
 
 const deleteGeminiFile = async ({ name, apiKey, signal }: { name: string; apiKey: string; signal?: AbortSignal }) => {
@@ -463,6 +482,12 @@ const extractGeminiErrorMessage = (data: unknown, status: number) => {
  }
 
  return `Gemini 요청 실패 (${status})`;
+};
+
+const isFilePermissionError = (message: string) => {
+ const lower = message.toLowerCase();
+
+ return lower.includes("you do not have permission to access the file") || lower.includes("permission_denied") || lower.includes("may not exist");
 };
 
 const isRetryableQuotaError = (message: string) => {
