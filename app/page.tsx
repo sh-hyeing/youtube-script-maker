@@ -401,7 +401,6 @@ export default function Page() {
    let finalTranscriptChunks = transcriptData.transcriptChunks || [];
 
    if (transcriptData.needsClientStt) {
-    const sttApiKey = apiKeys[activeKeyIndex] || apiKeys[0] || "";
     const cachedText = readCachedSttText(videoUrl);
 
     if (cachedText) {
@@ -416,10 +415,15 @@ export default function Page() {
 
      const sttText = await transcribeAudioWithGemini({
       audioUrl: transcriptData.audioUrl,
-      apiKey: sttApiKey,
+      apiKeys,
+      activeKeyIndex,
       titleHint: transcriptData.title || "",
       signal: controller.signal,
       onStatusChange: setStatusText,
+      onActiveKeyChange: setActiveKeyIndex,
+      onPersistActiveKey: (index) => {
+       localStorage.setItem(STORAGE_ACTIVE_KEY, String(index));
+      },
      });
 
      finalTranscriptText = sttText;

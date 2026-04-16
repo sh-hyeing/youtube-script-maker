@@ -1,10 +1,13 @@
 type TranscribeAudioParams = {
  audioUrl: string;
- apiKey: string;
+ apiKeys: string[];
+ activeKeyIndex?: number;
  titleHint?: string;
  signal?: AbortSignal;
  model?: string;
  onStatusChange?: (text: string) => void;
+ onActiveKeyChange?: (index: number) => void;
+ onPersistActiveKey?: (index: number) => void;
 };
 
 type UploadResult = {
@@ -43,7 +46,21 @@ const GEMINI_AUDIO_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"] as con
 const INLINE_AUDIO_LIMIT = 18 * 1024 * 1024;
 const MAX_AUTO_RETRY_MS = 1000 * 60 * 30;
 
-export const transcribeAudioWithGemini = async ({ audioUrl, apiKey, titleHint = "", signal, model, onStatusChange }: TranscribeAudioParams) => {
+export const transcribeAudioWithGemini = async ({
+ audioUrl,
+ apiKeys,
+ activeKeyIndex = 0,
+ titleHint = "",
+ signal,
+ model,
+ onStatusChange,
+ onActiveKeyChange,
+ onPersistActiveKey,
+}: TranscribeAudioParams) => {
+ if (apiKeys.length === 0) {
+  throw new Error("저장된 Gemini API 키가 없습니다.");
+ }
+
  const audioResponse = await fetch(audioUrl, {
   method: "GET",
   signal,
@@ -57,17 +74,25 @@ export const transcribeAudioWithGemini = async ({ audioUrl, apiKey, titleHint = 
  const audioBlob = await audioResponse.blob();
  const mimeType = audioBlob.type || guessMimeTypeFromUrl(audioUrl) || "audio/mp4";
  const models = model ? [model, ...GEMINI_AUDIO_MODELS.filter((item) => item !== model)] : [...GEMINI_AUDIO_MODELS];
+ let currentActiveKeyIndex = activeKeyIndex;
 
  if (audioBlob.size <= INLINE_AUDIO_LIMIT) {
-  return runWithModelFallbackAndRetry({
+  return runWithModelAndKeyFallbackAndRetry({
    models,
+   apiKeys,
+   activeKeyIndex: currentActiveKeyIndex,
    signal,
    onStatusChange,
-   runner: async (currentModel) => {
+   onActiveKeyChange: (nextIndex) => {
+    currentActiveKeyIndex = nextIndex;
+    onActiveKeyChange?.(nextIndex);
+   },
+   onPersistActiveKey,
+   runner: async ({ model: currentModel, apiKey: currentKey }) => {
     return requestInlineAudioTranscript({
      audioBlob,
      mimeType,
-     apiKey,
+     apiKey: currentKey,
      model: currentModel,
      titleHint,
      signal,
@@ -76,72 +101,99 @@ export const transcribeAudioWithGemini = async ({ audioUrl, apiKey, titleHint = 
   });
  }
 
- for (let attempt = 0; attempt < 2; attempt += 1) {
-  const uploadedFile = await uploadFileToGemini({
-   audioBlob,
-   mimeType,
-   apiKey,
-   displayName: extractFileName(audioUrl),
-   signal,
-  });
+ for (let keyLoop = 0; keyLoop < apiKeys.length; keyLoop += 1) {
+  const currentKeyIndex = (currentActiveKeyIndex + keyLoop) % apiKeys.length;
+  const currentKey = apiKeys[currentKeyIndex];
 
-  try {
-   await waitForFileReady({
-    name: uploadedFile.name,
-    apiKey,
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+   const uploadedFile = await uploadFileToGemini({
+    audioBlob,
+    mimeType,
+    apiKey: currentKey,
+    displayName: extractFileName(audioUrl),
     signal,
    });
 
-   return await runWithModelFallbackAndRetry({
-    models,
-    signal,
-    onStatusChange,
-    runner: async (currentModel) => {
-     return requestUploadedAudioTranscript({
-      fileUri: uploadedFile.uri,
-      mimeType: uploadedFile.mimeType,
-      apiKey,
-      model: currentModel,
-      titleHint,
-      signal,
-     });
-    },
-   });
-  } catch (error) {
-   if (error instanceof DOMException && error.name === "AbortError") {
+   try {
+    await waitForFileReady({
+     name: uploadedFile.name,
+     apiKey: currentKey,
+     signal,
+    });
+
+    const result = await runWithModelAndKeyFallbackAndRetry({
+     models,
+     apiKeys: [currentKey],
+     activeKeyIndex: 0,
+     signal,
+     onStatusChange,
+     onActiveKeyChange: () => {},
+     onPersistActiveKey: () => {},
+     runner: async ({ model: currentModel, apiKey: runnerKey }) => {
+      return requestUploadedAudioTranscript({
+       fileUri: uploadedFile.uri,
+       mimeType: uploadedFile.mimeType,
+       apiKey: runnerKey,
+       model: currentModel,
+       titleHint,
+       signal,
+      });
+     },
+    });
+
+    onActiveKeyChange?.(currentKeyIndex);
+    onPersistActiveKey?.(currentKeyIndex);
+    return result;
+   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+     throw error;
+    }
+
+    const message = error instanceof Error ? error.message : "";
+
+    if (isFilePermissionError(message) && attempt < 1) {
+     onStatusChange?.("파일 접근 오류로 재업로드 후 재시도 중");
+     await sleep(1500);
+     continue;
+    }
+
+    if (isFilePermissionError(message)) {
+     onStatusChange?.("다음 키로 재시도 중");
+     break;
+    }
+
     throw error;
+   } finally {
+    await deleteGeminiFile({
+     name: uploadedFile.name,
+     apiKey: currentKey,
+     signal,
+    }).catch(() => {});
    }
-
-   const message = error instanceof Error ? error.message : "";
-
-   if (!isFilePermissionError(message) || attempt === 1) {
-    throw error;
-   }
-
-   onStatusChange?.("파일 접근 오류로 재업로드 후 재시도 중");
-   await sleep(1500);
-  } finally {
-   await deleteGeminiFile({
-    name: uploadedFile.name,
-    apiKey,
-    signal,
-   }).catch(() => {});
   }
  }
 
  throw new Error("Gemini Files 처리에 실패했습니다.");
 };
 
-const runWithModelFallbackAndRetry = async ({
+const runWithModelAndKeyFallbackAndRetry = async ({
  models,
+ apiKeys,
+ activeKeyIndex,
  signal,
  onStatusChange,
+ onActiveKeyChange,
+ onPersistActiveKey,
  runner,
 }: {
  models: string[];
+ apiKeys: string[];
+ activeKeyIndex: number;
  signal?: AbortSignal;
  onStatusChange?: (text: string) => void;
- runner: (model: string) => Promise<string>;
+ onActiveKeyChange?: (index: number) => void;
+ onPersistActiveKey?: (index: number) => void;
+ runner: (params: { model: string; apiKey: string; keyIndex: number }) => Promise<string>;
 }) => {
  const startedAt = Date.now();
  const triedMessages: string[] = [];
@@ -153,46 +205,69 @@ const runWithModelFallbackAndRetry = async ({
   }
 
   const currentModel = models[Math.min(modelIndex, models.length - 1)];
+  let lastRetrySeconds: number | null = null;
 
-  try {
-   onStatusChange?.(modelIndex === 0 ? "음성 인식 중" : `음성 인식 중 (${currentModel})`);
-   return await runner(currentModel);
-  } catch (error) {
-   if (error instanceof DOMException && error.name === "AbortError") {
-    throw error;
-   }
+  for (let keyLoop = 0; keyLoop < apiKeys.length; keyLoop += 1) {
+   const currentKeyIndex = (activeKeyIndex + keyLoop) % apiKeys.length;
+   const currentKey = apiKeys[currentKeyIndex];
 
-   const message = error instanceof Error ? error.message : "알 수 없는 오류";
-   triedMessages.push(`${currentModel}: ${message}`);
+   try {
+    onStatusChange?.(modelIndex === 0 && keyLoop === 0 ? "음성 인식 중" : `음성 인식 중 (${currentModel} · 키 ${currentKeyIndex + 1})`);
 
-   const elapsed = Date.now() - startedAt;
-   if (elapsed >= MAX_AUTO_RETRY_MS) {
-    throw new Error(`음성 인식 자동 재시도 시간이 초과되었습니다.\n${triedMessages.join("\n")}`);
-   }
+    const result = await runner({
+     model: currentModel,
+     apiKey: currentKey,
+     keyIndex: currentKeyIndex,
+    });
 
-   if (!isRetryableQuotaError(message)) {
-    if (modelIndex < models.length - 1) {
-     modelIndex += 1;
-     onStatusChange?.(`다른 모델로 재시도 중 (${models[modelIndex]})`);
-     await sleep(1200);
+    onActiveKeyChange?.(currentKeyIndex);
+    onPersistActiveKey?.(currentKeyIndex);
+    return result;
+   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+     throw error;
+    }
+
+    const message = error instanceof Error ? error.message : "알 수 없는 오류";
+    triedMessages.push(`KEY ${currentKeyIndex + 1} · ${currentModel} · ${message}`);
+
+    if (isRetryableQuotaError(message)) {
+     const retrySeconds = extractRetrySeconds(message) ?? getBackoffSeconds(Date.now() - startedAt);
+     lastRetrySeconds = retrySeconds;
+     onStatusChange?.(`${Math.ceil(retrySeconds)}초 뒤 다음 키로 재시도`);
+     await sleep((retrySeconds + 1) * 1000);
      continue;
+    }
+
+    if (isFilePermissionError(message)) {
+     onStatusChange?.("파일 접근 오류로 다음 키 시도 중");
+     await sleep(1000);
+     continue;
+    }
+
+    if (modelIndex < models.length - 1) {
+     break;
     }
 
     throw error;
    }
-
-   const retrySeconds = extractRetrySeconds(message) ?? getBackoffSeconds(elapsed);
-
-   if (modelIndex < models.length - 1) {
-    modelIndex += 1;
-    onStatusChange?.(`${Math.ceil(retrySeconds)}초 뒤 다른 모델로 재시도`);
-    await sleep((retrySeconds + 1) * 1000);
-    continue;
-   }
-
-   onStatusChange?.(`${Math.ceil(retrySeconds)}초 뒤 자동 재시도`);
-   await sleep((retrySeconds + 1) * 1000);
   }
+
+  const elapsed = Date.now() - startedAt;
+  if (elapsed >= MAX_AUTO_RETRY_MS) {
+   throw new Error(`음성 인식 자동 재시도 시간이 초과되었습니다.\n${triedMessages.join("\n")}`);
+  }
+
+  if (modelIndex < models.length - 1) {
+   modelIndex += 1;
+   onStatusChange?.(`다른 모델로 재시도 중 (${models[modelIndex]})`);
+   await sleep(1200);
+   continue;
+  }
+
+  const retrySeconds = lastRetrySeconds ?? getBackoffSeconds(elapsed);
+  onStatusChange?.(`${Math.ceil(retrySeconds)}초 뒤 자동 재시도`);
+  await sleep((retrySeconds + 1) * 1000);
  }
 };
 
