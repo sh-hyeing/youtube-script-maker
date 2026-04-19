@@ -515,6 +515,7 @@ const buildTranscriptPrompt = (titleHint: string) => {
   "외부 지식, 기억, 알려진 가사를 이용해 보완하지 마세요.",
   "같은 구절의 반복은 실제로 다시 또렷하게 들릴 때만 적고, 반복을 추정해서 늘리지 마세요.",
   "문장 순서를 유지하세요.",
+  "번역문은 한국어로 자연스럽게 읽혀야 하지만, 원문의 화자 성격, 감정선, 높임 수준, 거친 말투나 부드러운 말투는 가능한 한 유지하세요.",
   normalizedTitleHint ? `제목 힌트: ${normalizedTitleHint}` : "",
  ]
   .filter(Boolean)
