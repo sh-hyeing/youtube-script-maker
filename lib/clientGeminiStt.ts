@@ -45,7 +45,6 @@ type GeminiGenerateResponse = {
 const GEMINI_AUDIO_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"] as const;
 const INLINE_AUDIO_LIMIT = 18 * 1024 * 1024;
 const MAX_AUTO_RETRY_MS = 1000 * 60 * 30;
-const MAX_STT_REPEATED_SENTENCE_COUNT = 8;
 
 export const transcribeAudioWithGemini = async ({
  audioUrl,
@@ -515,31 +514,20 @@ const deleteGeminiFile = async ({ name, apiKey, signal }: { name: string; apiKey
 const sanitizeTitleHint = (value: string) => {
  const cleaned = value
   .replace(/\u0000/g, "")
-  .replace(/\uFFFD/g, "")
   .replace(/[\r\n\t]+/g, " ")
-  .replace(/[^\p{L}\p{N}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\s()[\]{}'"“”‘’.,!?&:;+\-_/#|·・~]/gu, "")
   .replace(/\s+/g, " ")
   .replace(/0{20,}/g, "")
-  .replace(/([A-Za-z0-9])\1{12,}/g, "$1")
   .trim();
 
- if (!cleaned || cleaned.length < 2 || /^[\d\s._\-|]+$/.test(cleaned)) {
-  return "";
- }
-
- return cleaned.slice(0, 120);
+ return cleaned.slice(0, 160);
 };
 
 const buildTranscriptPrompt = (titleHint: string) => {
  const normalizedTitleHint = sanitizeTitleHint(titleHint);
 
  return [
-  "다음 오디오에서 실제로 들리는 말을 가능한 한 빠짐없이 전사하세요.",
+  "다음 오디오의 들리는 말만 보수적으로 전사하세요.",
   "반드시 전사 결과 본문만 출력하세요.",
-  "설명, 요약, 해설, 제목, 머리말, 인사말, 확인 문장 같은 응답형 문장은 출력하지 마세요.",
-  "들리는 단어와 문장은 짧거나 불완전해도 생략하지 말고 들린 순서대로 적으세요.",
-  "잘 들리지 않는 부분만 무리하게 추측하지 마세요.",
-  "같은 문장이나 구절을 실제 오디오보다 많이 반복해서 생성하지 마세요.",
   "노래/가사라면 외부 지식, 기억, 알려진 가사를 이용해 보완하지 마세요.",
   "노래/가사라면 같은 구절의 반복은 실제로 다시 또렷하게 들릴 때만 적고, 반복을 추정해서 늘리지 마세요.",
   "문장 순서를 유지하세요.",
@@ -572,31 +560,6 @@ const extractGeminiText = (data: unknown) => {
 };
 
 const extractGeminiErrorMessage = (data: unknown, status: number) => {
- const upstreamMessage =
-  data &&
-  typeof data === "object" &&
-  "error" in data &&
-  data.error &&
-  typeof data.error === "object" &&
-  "message" in data.error &&
-  typeof data.error.message === "string"
-   ? data.error.message
-   : "";
-
- const withUpstreamMessage = (message: string) => (upstreamMessage ? `${message} ${upstreamMessage}` : message);
-
- if (status === 429) {
-  return withUpstreamMessage("Gemini 요청 한도에 도달했습니다. 잠시 후 다시 시도해주세요. (429)");
- }
-
- if (status === 503) {
-  return withUpstreamMessage("Gemini 서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해주세요. (503)");
- }
-
- if (status === 500 || status === 502 || status === 504) {
-  return withUpstreamMessage(`Gemini 서버가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요. (${status})`);
- }
-
  if (
   data &&
   typeof data === "object" &&
@@ -607,6 +570,18 @@ const extractGeminiErrorMessage = (data: unknown, status: number) => {
   typeof data.error.message === "string"
  ) {
   return data.error.message;
+ }
+
+ if (status === 429) {
+  return "Gemini 요청 한도에 도달했습니다. 잠시 후 다시 시도해주세요.";
+ }
+
+ if (status === 503) {
+  return "Gemini 서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도해주세요. (503)";
+ }
+
+ if (status === 500 || status === 502 || status === 504) {
+  return `Gemini 서버가 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요. (${status})`;
  }
 
  return `Gemini 요청 실패 (${status})`;
@@ -672,59 +647,12 @@ const blobToBase64 = async (blob: Blob) => {
 };
 
 const normalizeTranscriptText = (text: string) => {
- return collapseRunawayRepeatedSentences(text)
+ return text
   .replace(/\r/g, "")
   .split("\n")
   .map((line) => line.trim())
-  .filter((line, index) => {
-   if (index > 2) return true;
-
-   return !/^(네|예|알겠습니다|물론입니다|좋습니다)[,. ]*(오디오|음성|내용|전사|자막)/.test(line);
-  })
-  .filter((line) => !/^(전사 결과|자막|스크립트)\s*[:：]\s*$/.test(line))
   .filter(Boolean)
   .join("\n")
-  .trim();
-};
-
-const collapseRunawayRepeatedSentences = (text: string) => {
- const sentences = text.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/g);
- if (!sentences || sentences.length < 24) return text;
-
- const normalizedSentences = sentences.map(normalizeSentenceForRepeatCheck).filter(Boolean);
- const uniqueCount = new Set(normalizedSentences).size;
-
- if (uniqueCount > 8) return text;
-
- const counts = new Map<string, number>();
- let removedCount = 0;
- const collapsed = sentences
-  .filter((sentence) => {
-   const key = normalizeSentenceForRepeatCheck(sentence);
-   if (!key) return true;
-
-   const nextCount = (counts.get(key) || 0) + 1;
-   counts.set(key, nextCount);
-
-   if (nextCount > MAX_STT_REPEATED_SENTENCE_COUNT) {
-    removedCount += 1;
-    return false;
-   }
-
-   return true;
-  })
-  .join(" ")
-  .replace(/\s+/g, " ")
-  .trim();
-
- return removedCount >= 8 && collapsed ? collapsed : text;
-};
-
-const normalizeSentenceForRepeatCheck = (value: string) => {
- return value
-  .toLowerCase()
-  .replace(/[^\p{L}\p{N}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]+/gu, " ")
-  .replace(/\s+/g, " ")
   .trim();
 };
 
