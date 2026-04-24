@@ -17,15 +17,7 @@ type TranscriptResponse = {
  needsClientStt?: boolean;
  audioUrl?: string;
  audioMimeType?: string;
- audioSegments?: Array<{
-  url?: string;
-  mimeType?: string;
-  index?: number;
-  startSeconds?: number;
-  endSeconds?: number;
- }>;
  expiresAt?: number;
- startSeconds?: number;
 };
 
 type ViewMode = "bilingual" | "english" | "korean";
@@ -80,7 +72,7 @@ const FLASH_LITE_MODEL = "gemini-2.5-flash-lite";
 const LONG_VIDEO_CHUNK_THRESHOLD = 25;
 const STORAGE_KEY = "gemini_api_keys_v1";
 const STORAGE_ACTIVE_KEY = "gemini_active_key_index_v1";
-const STT_CACHE_PREFIX = "gemini_stt_cache_v2:";
+const STT_CACHE_PREFIX = "gemini_stt_cache_v1:";
 
 const chunkTextByLine = (text: string, maxLength = 2800) => {
  if (!text.trim()) return [];
@@ -141,82 +133,6 @@ const writeCachedSttText = (videoUrl: string, text: string) => {
    }),
   );
  } catch {}
-};
-
-const transcribeAudioSources = async ({
- transcriptData,
- apiKeys,
- activeKeyIndex,
- signal,
- onStatusChange,
- onActiveKeyChange,
- onPersistActiveKey,
-}: {
- transcriptData: TranscriptResponse;
- apiKeys: string[];
- activeKeyIndex: number;
- signal: AbortSignal;
- onStatusChange: (text: string) => void;
- onActiveKeyChange: (index: number) => void;
- onPersistActiveKey: (index: number) => void;
-}) => {
- const segmentUrls = Array.isArray(transcriptData.audioSegments)
-  ? transcriptData.audioSegments
-    .filter((segment) => segment && typeof segment.url === "string" && segment.url.trim())
-    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-  : [];
-
- if (segmentUrls.length === 0) {
-  if (!transcriptData.audioUrl) {
-   throw new Error("음성 인식용 오디오 주소를 받지 못했습니다.");
-  }
-
-  onStatusChange("음성 인식 중");
-
-  return transcribeAudioWithGemini({
-   audioUrl: transcriptData.audioUrl,
-   apiKeys,
-   activeKeyIndex,
-   titleHint: transcriptData.title || "",
-   signal,
-   onStatusChange,
-   onActiveKeyChange,
-   onPersistActiveKey,
-  });
- }
-
- const transcriptParts: string[] = [];
- let currentActiveKeyIndex = activeKeyIndex;
-
- for (let i = 0; i < segmentUrls.length; i += 1) {
-  const segment = segmentUrls[i];
-
-  if (signal.aborted) {
-   throw new DOMException("Aborted", "AbortError");
-  }
-
-  onStatusChange(`음성 인식 중 (${i + 1}/${segmentUrls.length})`);
-
-  const text = await transcribeAudioWithGemini({
-   audioUrl: segment.url || "",
-   apiKeys,
-   activeKeyIndex: currentActiveKeyIndex,
-   titleHint: transcriptData.title || "",
-   signal,
-   onStatusChange: (status) => onStatusChange(`음성 인식 중 (${i + 1}/${segmentUrls.length}) · ${status}`),
-   onActiveKeyChange: (index) => {
-    currentActiveKeyIndex = index;
-    onActiveKeyChange(index);
-   },
-   onPersistActiveKey,
-  });
-
-  if (text.trim()) {
-   transcriptParts.push(text.trim());
-  }
- }
-
- return transcriptParts.join("\n").trim();
 };
 
 export default function Page() {
@@ -491,10 +407,17 @@ export default function Page() {
      finalTranscriptText = cachedText;
      finalTranscriptChunks = chunkTextByLine(cachedText, 2800);
     } else {
-     const sttText = await transcribeAudioSources({
-      transcriptData,
+     if (!transcriptData.audioUrl) {
+      throw new Error("음성 인식용 오디오 주소를 받지 못했습니다.");
+     }
+
+     setStatusText("음성 인식 중");
+
+     const sttText = await transcribeAudioWithGemini({
+      audioUrl: transcriptData.audioUrl,
       apiKeys,
       activeKeyIndex,
+      titleHint: transcriptData.title || "",
       signal: controller.signal,
       onStatusChange: setStatusText,
       onActiveKeyChange: setActiveKeyIndex,

@@ -2,26 +2,6 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-function parseYoutubeStartSeconds(url) {
- const rawTime = url.searchParams.get("t") || url.searchParams.get("start") || "";
-
- if (!rawTime) return 0;
-
- const value = String(rawTime).trim().toLowerCase();
- const hmsMatch = value.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/);
-
- if (hmsMatch && (hmsMatch[1] || hmsMatch[2] || hmsMatch[3])) {
-  const hours = Number(hmsMatch[1] || 0);
-  const minutes = Number(hmsMatch[2] || 0);
-  const seconds = Number(hmsMatch[3] || 0);
-  const total = hours * 3600 + minutes * 60 + seconds;
-  return Number.isFinite(total) && total > 0 ? Math.floor(total) : 0;
- }
-
- const numeric = Number(value.replace(/s$/, ""));
- return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : 0;
-}
-
 function normalizeYoutubeUrl(input) {
  const value = String(input || "").trim();
 
@@ -48,10 +28,7 @@ function normalizeYoutubeUrl(input) {
   if (!id) {
    throw new Error("INVALID_YOUTUBE_URL");
   }
-  return {
-   normalizedUrl: `https://www.youtube.com/watch?v=${id}`,
-   startSeconds: parseYoutubeStartSeconds(url),
-  };
+  return `https://www.youtube.com/watch?v=${id}`;
  }
 
  const videoId = url.searchParams.get("v");
@@ -59,10 +36,7 @@ function normalizeYoutubeUrl(input) {
   throw new Error("INVALID_YOUTUBE_URL");
  }
 
- return {
-  normalizedUrl: `https://www.youtube.com/watch?v=${videoId}`,
-  startSeconds: parseYoutubeStartSeconds(url),
- };
+ return `https://www.youtube.com/watch?v=${videoId}`;
 }
 
 function getRailwayBaseUrl() {
@@ -124,12 +98,9 @@ export async function POST(req) {
   const lang = body && typeof body === "object" && typeof body.lang === "string" ? body.lang.trim() : "";
 
   let normalizedUrl;
-  let startSeconds = 0;
 
   try {
-   const normalized = normalizeYoutubeUrl(videoUrl);
-   normalizedUrl = normalized.normalizedUrl;
-   startSeconds = normalized.startSeconds;
+   normalizedUrl = normalizeYoutubeUrl(videoUrl);
   } catch (error) {
    const message = error instanceof Error ? error.message : "INVALID_REQUEST";
 
@@ -166,7 +137,6 @@ export async function POST(req) {
    cache: "no-store",
    body: JSON.stringify({
     videoUrl: normalizedUrl,
-    ...(startSeconds > 0 ? { startSeconds } : {}),
     ...(lang ? { lang } : {}),
    }),
   });
@@ -245,12 +215,7 @@ export async function POST(req) {
      needsClientStt: true,
      audioUrl: data && typeof data === "object" && typeof data.audioUrl === "string" ? data.audioUrl : "",
      audioMimeType: data && typeof data === "object" && typeof data.audioMimeType === "string" ? data.audioMimeType : "",
-     audioSegments:
-      data && typeof data === "object" && Array.isArray(data.audioSegments)
-       ? data.audioSegments.filter((item) => item && typeof item === "object")
-       : [],
      expiresAt: data && typeof data === "object" && typeof data.expiresAt === "number" ? data.expiresAt : 0,
-     startSeconds,
     },
     { status: 200 },
    );
@@ -282,9 +247,7 @@ export async function POST(req) {
     needsClientStt: false,
     audioUrl: "",
     audioMimeType: "",
-    audioSegments: [],
     expiresAt: 0,
-    startSeconds,
    },
    { status: 200 },
   );

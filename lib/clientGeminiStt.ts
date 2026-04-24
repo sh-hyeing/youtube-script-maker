@@ -45,6 +45,7 @@ type GeminiGenerateResponse = {
 const GEMINI_AUDIO_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"] as const;
 const INLINE_AUDIO_LIMIT = 18 * 1024 * 1024;
 const MAX_AUTO_RETRY_MS = 1000 * 60 * 30;
+const MAX_STT_REPEATED_SENTENCE_COUNT = 8;
 
 export const transcribeAudioWithGemini = async ({
  audioUrl,
@@ -533,13 +534,10 @@ const buildTranscriptPrompt = (titleHint: string) => {
  const normalizedTitleHint = sanitizeTitleHint(titleHint);
 
  return [
-  "다음 오디오에서 실제로 들리는 말을 전사하세요.",
+  "다음 오디오에서 실제로 들리는 말을 가능한 한 빠짐없이 전사하세요.",
   "반드시 전사 결과 본문만 출력하세요.",
-  "번역, 의역, 요약, 학습 자료 재구성을 하지 마세요.",
-  "영어로 들리는 말은 영어로, 한국어로 들리는 말은 한국어로 적으세요.",
-  "영어 문장을 한국어로 바꾸거나 한국어 문장을 영어로 바꾸지 마세요.",
   "설명, 요약, 해설, 제목, 머리말, 인사말, 확인 문장 같은 응답형 문장은 출력하지 마세요.",
-  "들리는 단어와 문장은 짧거나 불완전해도 들린 순서대로 적으세요.",
+  "들리는 단어와 문장은 짧거나 불완전해도 생략하지 말고 들린 순서대로 적으세요.",
   "잘 들리지 않는 부분만 무리하게 추측하지 마세요.",
   "같은 문장이나 구절을 실제 오디오보다 많이 반복해서 생성하지 마세요.",
   "노래/가사라면 외부 지식, 기억, 알려진 가사를 이용해 보완하지 마세요.",
@@ -674,12 +672,59 @@ const blobToBase64 = async (blob: Blob) => {
 };
 
 const normalizeTranscriptText = (text: string) => {
- return text
+ return collapseRunawayRepeatedSentences(text)
   .replace(/\r/g, "")
   .split("\n")
   .map((line) => line.trim())
+  .filter((line, index) => {
+   if (index > 2) return true;
+
+   return !/^(네|예|알겠습니다|물론입니다|좋습니다)[,. ]*(오디오|음성|내용|전사|자막)/.test(line);
+  })
+  .filter((line) => !/^(전사 결과|자막|스크립트)\s*[:：]\s*$/.test(line))
   .filter(Boolean)
   .join("\n")
+  .trim();
+};
+
+const collapseRunawayRepeatedSentences = (text: string) => {
+ const sentences = text.match(/[^.!?。！？]+[.!?。！？]+|[^.!?。！？]+$/g);
+ if (!sentences || sentences.length < 24) return text;
+
+ const normalizedSentences = sentences.map(normalizeSentenceForRepeatCheck).filter(Boolean);
+ const uniqueCount = new Set(normalizedSentences).size;
+
+ if (uniqueCount > 8) return text;
+
+ const counts = new Map<string, number>();
+ let removedCount = 0;
+ const collapsed = sentences
+  .filter((sentence) => {
+   const key = normalizeSentenceForRepeatCheck(sentence);
+   if (!key) return true;
+
+   const nextCount = (counts.get(key) || 0) + 1;
+   counts.set(key, nextCount);
+
+   if (nextCount > MAX_STT_REPEATED_SENTENCE_COUNT) {
+    removedCount += 1;
+    return false;
+   }
+
+   return true;
+  })
+  .join(" ")
+  .replace(/\s+/g, " ")
+  .trim();
+
+ return removedCount >= 8 && collapsed ? collapsed : text;
+};
+
+const normalizeSentenceForRepeatCheck = (value: string) => {
+ return value
+  .toLowerCase()
+  .replace(/[^\p{L}\p{N}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]+/gu, " ")
+  .replace(/\s+/g, " ")
   .trim();
 };
 
