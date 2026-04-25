@@ -45,6 +45,7 @@ type GeminiGenerateResponse = {
 const GEMINI_AUDIO_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"] as const;
 const INLINE_AUDIO_LIMIT = 18 * 1024 * 1024;
 const MAX_AUTO_RETRY_MS = 1000 * 60 * 30;
+const MAX_STT_OUTPUT_TOKENS = 32768;
 
 export const transcribeAudioWithGemini = async ({
  audioUrl,
@@ -314,10 +315,11 @@ const requestInlineAudioTranscript = async ({
      ],
     },
    ],
-   generationConfig: {
-    temperature: 0,
-   },
-  }),
+  generationConfig: {
+   temperature: 0,
+   maxOutputTokens: MAX_STT_OUTPUT_TOKENS,
+  },
+ }),
   signal,
  });
 
@@ -372,10 +374,11 @@ const requestUploadedAudioTranscript = async ({
      ],
     },
    ],
-   generationConfig: {
-    temperature: 0,
-   },
-  }),
+  generationConfig: {
+   temperature: 0,
+   maxOutputTokens: MAX_STT_OUTPUT_TOKENS,
+  },
+ }),
   signal,
  });
 
@@ -526,18 +529,16 @@ const buildTranscriptPrompt = (titleHint: string) => {
  const normalizedTitleHint = sanitizeTitleHint(titleHint);
 
  return [
-  "다음 오디오에서 실제로 들리는 모든 말을 원문 언어 그대로 전사하세요.",
+  "이 작업은 요약이나 문장 추출이 아니라 오디오 전체 받아쓰기입니다.",
+  "오디오에서 실제로 들리는 모든 발화를 처음부터 끝까지 원문 언어 그대로 전사하세요.",
   "반드시 전사 결과 본문만 출력하세요.",
-  "번역, 의역, 요약, 학습 자료 재구성을 하지 마세요.",
-  "대표 문장만 고르거나 핵심 내용만 추출하지 마세요.",
-  "노래/가사라면 들리는 가사 줄을 생략하지 말고 순서대로 모두 적으세요.",
+  "번역, 의역, 요약, 정리, 학습 자료 재구성을 하지 마세요.",
+  "일부 문장만 고르지 말고 들리는 순서대로 모두 적으세요.",
+  "오디오가 길어도 중간을 건너뛰거나 앞부분만 출력하지 말고 끝까지 전사하세요.",
   "영어로 들리는 말은 영어로, 한국어로 들리는 말은 한국어로 적으세요.",
   "영어 문장을 한국어로 바꾸거나 한국어 문장을 영어로 바꾸지 마세요.",
-  "들리는 단어와 문장은 짧거나 불완전해도 들린 순서대로 적으세요.",
-  "설명, 해설, 제목, 머리말, 확인 문장 같은 응답형 문장은 출력하지 마세요.",
+  "들리는 단어와 문장은 짧거나 불완전해도 생략하지 말고 적으세요.",
   "노래/가사라면 외부 지식, 기억, 알려진 가사를 이용해 보완하지 마세요.",
-  "노래/가사라면 같은 구절의 반복도 실제로 들리는 만큼 줄 순서를 유지해 적으세요.",
-  "모르는 부분이 있어도 그 이유로 앞뒤 문장이나 가사 줄을 생략하지 마세요.",
   "문장 순서를 유지하세요.",
   normalizedTitleHint ? `제목 힌트: ${normalizedTitleHint}` : "",
  ]
