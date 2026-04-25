@@ -45,7 +45,6 @@ type GeminiGenerateResponse = {
 const GEMINI_AUDIO_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"] as const;
 const INLINE_AUDIO_LIMIT = 18 * 1024 * 1024;
 const MAX_AUTO_RETRY_MS = 1000 * 60 * 30;
-const MAX_STT_OUTPUT_TOKENS = 32768;
 
 export const transcribeAudioWithGemini = async ({
  audioUrl,
@@ -317,7 +316,6 @@ const requestInlineAudioTranscript = async ({
    ],
   generationConfig: {
    temperature: 0,
-   maxOutputTokens: MAX_STT_OUTPUT_TOKENS,
   },
  }),
   signal,
@@ -376,7 +374,6 @@ const requestUploadedAudioTranscript = async ({
    ],
   generationConfig: {
    temperature: 0,
-   maxOutputTokens: MAX_STT_OUTPUT_TOKENS,
   },
  }),
   signal,
