@@ -6,6 +6,7 @@ export type ScriptPair = {
 
 export type GeminiError = Error & {
  status?: number;
+ code?: string;
 };
 
 type RequestGeminiParams = {
@@ -275,6 +276,19 @@ export const extractRetrySeconds = (message: string) => {
  return seconds;
 };
 
+const createStructuredResponseError = (raw: string) => {
+ const preview = raw.replace(/\s+/g, " ").trim().slice(0, 300);
+ const error = new Error(
+  preview ? `Structured JSON response parsing failed. Response preview: ${preview}` : "Structured JSON response parsing failed.",
+ ) as GeminiError;
+ error.code = "STRUCTURED_RESPONSE_INVALID";
+ return error;
+};
+
+const isStructuredResponseError = (error: unknown) => {
+ return typeof error === "object" && error !== null && "code" in error && (error as GeminiError).code === "STRUCTURED_RESPONSE_INVALID";
+};
+
 export const dedupePairs = (items: ScriptPair[], { preserveMarkedDuplicates = true }: DedupePairsOptions = {}) => {
  const seen = new Set<string>();
  const result: ScriptPair[] = [];
@@ -357,8 +371,7 @@ export const callGeminiChunk = async ({
     const parsed = safeParsePairs(raw);
 
     if (parsed.length === 0) {
-     const preview = raw.replace(/\s+/g, " ").trim().slice(0, 300);
-     throw new Error(preview ? `구조화된 JSON 응답 파싱에 실패했습니다. 응답 미리보기: ${preview}` : "구조화된 JSON 응답 파싱에 실패했습니다.");
+     throw createStructuredResponseError(raw);
     }
 
     onActiveKeyChange?.(currentIndex);
@@ -381,11 +394,11 @@ export const callGeminiChunk = async ({
      maxRetrySeconds = retrySeconds;
     }
 
-    if (!isRotationCandidate(error)) {
+    if (!isRotationCandidate(error) && !isStructuredResponseError(error)) {
      throw error;
     }
 
-    onStatusChange?.("다음 키로 재시도 중");
+    onStatusChange?.(isStructuredResponseError(error) ? "Response format was unstable, retrying with the next key" : "다음 키로 재시도 중");
     if (sleepMs > 0) {
      await sleep(sleepMs);
     }
