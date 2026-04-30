@@ -59,7 +59,7 @@ export const downloadStudyScriptPdf = async ({ pairs, videoUrl, filename = "stud
  const lineHeight = 5.8;
  const cellPaddingX = 4;
  const cellPaddingY = 3.4;
- const numberColumnWidth = 14;
+ const numberColumnWidth = 16;
  const englishColumnWidth = (contentWidth - numberColumnWidth) * 0.58;
  const koreanColumnWidth = contentWidth - numberColumnWidth - englishColumnWidth;
 
@@ -117,7 +117,7 @@ export const downloadStudyScriptPdf = async ({ pairs, videoUrl, filename = "stud
    .trim();
 
   doc.setFontSize(cellFontSize);
-  const numberLines = doc.splitTextToSize(numberText, Math.max(1, numberColumnWidth - cellPaddingX * 2));
+  const numberLines = [numberText];
   const englishLines = doc.splitTextToSize(englishText || " ", Math.max(1, englishColumnWidth - cellPaddingX * 2));
   const koreanLines = doc.splitTextToSize(koreanText || " ", Math.max(1, koreanColumnWidth - cellPaddingX * 2));
 

@@ -4,6 +4,8 @@ export type ScriptPair = {
  keepDuplicate?: boolean;
 };
 
+export type ContentMode = "learning" | "song" | "conversation";
+
 export type GeminiError = Error & {
  status?: number;
  code?: string;
@@ -22,6 +24,7 @@ type StructuredPairsParams = {
  index: number;
  total: number;
  apiKey: string;
+ contentMode: ContentMode;
  signal?: AbortSignal;
 };
 
@@ -33,6 +36,7 @@ type CallGeminiChunkParams = {
  activeKeyIndex: number;
  primaryModel: string;
  fallbackModel: string;
+ contentMode: ContentMode;
  signal?: AbortSignal;
  onStatusChange?: (text: string) => void;
  onActiveKeyChange?: (index: number) => void;
@@ -49,12 +53,14 @@ type ProcessChunksParams = {
  activeKeyIndex: number;
  primaryModel: string;
  fallbackModel: string;
+ contentMode: ContentMode;
  onStatusChange?: (text: string) => void;
  onActiveKeyChange?: (index: number) => void;
  onPersistActiveKey?: (index: number) => void;
  onPairsChange?: (pairs: ScriptPair[]) => void;
  onResumeIndexChange?: (index: number) => void;
  preserveMarkedDuplicates?: boolean;
+ concurrency?: number;
 };
 
 type DedupePairsOptions = {
@@ -252,6 +258,71 @@ export const requestStructuredPairs = async ({ model, chunk, index, total, apiKe
  return requestGeminiWithKey({ model, prompt, apiKey, signal });
 };
 
+const COMMON_PROMPT_RULES = [
+ "다음은 유튜브 자막 원문입니다.",
+ "한국어와 영어가 섞여 있고, 반복, 끊긴 문장, 자막 오류가 있을 수 있습니다.",
+ "[공통 규칙]",
+ "1. 설명, 해설, 제목, 서론, 판단 근거를 쓰지 말고 JSON 배열만 반환하세요.",
+ '2. 모든 항목은 반드시 {"en":"영어 문장","ko":"한국어 번역","keepDuplicate":true 또는 false} 형식으로만 반환하세요.',
+ "3. JSON 배열 바깥에 어떤 문자도 쓰지 마세요.",
+ "4. 한국어 번역은 직역투를 피하고 자연스럽게 의역하되, 원문의 말투, 분위기, 정보량, 의도를 최대한 그대로 유지하세요.",
+ "5. 원문의 사실 관계를 바꾸거나, 없는 의미를 덧붙이거나, 내용을 축약하거나 미화하지 마세요.",
+ "6. 고유명사는 임의로 과도하게 현지화하지 마세요.",
+ "7. 번역문도 한국어로 자연스럽게 쓰되, 원문의 화자 성격, 감정선, 높임 수준, 거친 말투와 부드러운 말투를 가능한 한 유지하세요.",
+];
+
+const MODE_PROMPT_RULES: Record<ContentMode, string[]> = {
+ learning: [
+  "[이 영상 타입]",
+  "이 영상은 일반 학습 영상입니다. 아래 학습 영상 규칙만 적용하세요.",
+  "[학습 영상 규칙]",
+  "1. 영어 학습에 직접 쓰는 문장만 남기세요.",
+  "2. 시작 인사, 영상 소개, 광고, 구독 유도, 동기부여 멘트, 교재 홍보, 강의 홍보, 설명용 한국어 서론, 설명용 한국어 마무리, 번호 읽기, 반복 안내, 따라 읽기 안내, 해설 멘트는 제거하세요.",
+  "3. 같은 영어 문장이 반복돼도 한 번만 남기고 keepDuplicate는 false로 두세요.",
+  "4. 잘린 영어 문장은 문맥상 자연스럽게 복원하세요.",
+ ],
+ song: [
+  "[이 영상 타입]",
+  "이 영상은 노래/가사 영상입니다. 아래 노래/가사 규칙만 적용하세요.",
+  "[노래/가사 규칙]",
+  "1. 후렴, 훅, 브리지처럼 반복되는 가사를 순서대로 그대로 유지하고 합치지 마세요.",
+  "2. 학습용 문장 추출 모드로 바꾸지 말고 입력 텍스트 정리 모드로 처리하세요.",
+  "3. 입력 텍스트에 있는 모든 가사 줄을 빠짐없이 항목으로 반환하세요.",
+  "4. 입력 텍스트에 실제로 있는 반복만 유지하고, 반복되는 줄을 합치거나 삭제하지 마세요.",
+  "5. 외부 지식, 기억, 알려진 원곡 가사를 이용해 보완하지 마세요.",
+  "6. 불명확한 부분을 추측해서 복원하지 말고, 입력 텍스트에 적힌 줄과 순서를 보존하세요.",
+  '7. 모든 항목은 {"en":"영어 문장","ko":"한국어 번역","keepDuplicate":true} 형식으로 반환하세요.',
+ ],
+ conversation: [
+  "[이 영상 타입]",
+  "이 영상은 영화/인터뷰/대화형 영상입니다. 아래 대화형 영상 규칙만 적용하세요.",
+  "[대화형 영상 규칙]",
+  "1. 대사, 질문, 답변, 짧은 반응, 추임새를 포함해 입력 텍스트에 있는 모든 문장을 순서대로 유지하세요.",
+  "2. 일부 문장만 추려서 학습용 문장 목록으로 바꾸지 말고, 요약하거나 문장을 합치거나 삭제하지 마세요.",
+  "3. 실제로 반복된 문장도 그대로 유지하고 keepDuplicate는 true로 두세요.",
+  "4. 문장 순서, 말투, 질문-답변 관계, 대화 흐름을 보존하세요.",
+ ],
+};
+
+const requestStructuredPairsByMode = async ({ model, chunk, index, total, apiKey, contentMode, signal }: StructuredPairsParams) => {
+ const prompt = [
+  ...COMMON_PROMPT_RULES,
+  "",
+  ...MODE_PROMPT_RULES[contentMode],
+  "",
+  "반환 예시:",
+  contentMode === "learning"
+   ? '[{"en":"How are you?","ko":"어떻게 지내세요?","keepDuplicate":false}]'
+   : '[{"en":"How are you?","ko":"어떻게 지내세요?","keepDuplicate":true}]',
+  "",
+  `현재 청크: ${index + 1}/${total}`,
+  "",
+  chunk,
+ ].join("\n");
+
+ return requestGeminiWithKey({ model, prompt, apiKey, signal });
+};
+
 export const isRotationCandidate = (error: unknown) => {
  const status = typeof error === "object" && error !== null && "status" in error ? (error as GeminiError).status : undefined;
  const message = error instanceof Error ? error.message.toLowerCase() : "";
@@ -332,6 +403,7 @@ export const callGeminiChunk = async ({
  activeKeyIndex,
  primaryModel,
  fallbackModel,
+ contentMode,
  signal,
  onStatusChange,
  onActiveKeyChange,
@@ -345,7 +417,7 @@ export const callGeminiChunk = async ({
  const models = [primaryModel, fallbackModel];
  const tried: string[] = [];
  let lastError: unknown;
- let maxRetrySeconds = 0;
+ let minRetrySeconds: number | null = null;
 
  for (const model of models) {
   for (let keyLoop = 0; keyLoop < apiKeys.length; keyLoop += 1) {
@@ -359,12 +431,13 @@ export const callGeminiChunk = async ({
    try {
     onStatusChange?.("번역 중");
 
-    const raw = await requestStructuredPairs({
+    const raw = await requestStructuredPairsByMode({
      model,
      chunk,
      index,
      total,
      apiKey: currentKey,
+     contentMode,
      signal,
     });
 
@@ -390,8 +463,8 @@ export const callGeminiChunk = async ({
     tried.push(`KEY ${currentIndex + 1} · ${model} · ${message}`);
 
     const retrySeconds = extractRetrySeconds(message);
-    if (retrySeconds && retrySeconds > maxRetrySeconds) {
-     maxRetrySeconds = retrySeconds;
+    if (retrySeconds && retrySeconds > 0) {
+     minRetrySeconds = minRetrySeconds === null ? retrySeconds : Math.min(minRetrySeconds, retrySeconds);
     }
 
     if (!isRotationCandidate(error) && !isStructuredResponseError(error)) {
@@ -412,8 +485,8 @@ export const callGeminiChunk = async ({
    : `사용 가능한 API 키가 없습니다.\n시도한 키:\n${tried.join("\n")}`,
  ) as GeminiError & { retryAfterSeconds?: number };
 
- if (maxRetrySeconds > 0) {
-  exhaustedError.retryAfterSeconds = maxRetrySeconds;
+ if (minRetrySeconds && minRetrySeconds > 0) {
+  exhaustedError.retryAfterSeconds = minRetrySeconds;
  }
 
  throw exhaustedError;
@@ -428,60 +501,94 @@ export const processChunks = async ({
  activeKeyIndex,
  primaryModel,
  fallbackModel,
+ contentMode,
  onStatusChange,
  onActiveKeyChange,
  onPersistActiveKey,
  onPairsChange,
  onResumeIndexChange,
  preserveMarkedDuplicates = true,
+ concurrency = 1,
 }: ProcessChunksParams) => {
  const mergedPairs: ScriptPair[] = [...initialPairs];
  let currentActiveKeyIndex = activeKeyIndex;
+ const chunkResults = new Map<number, ScriptPair[]>();
+ let nextChunkIndex = startIndex;
+ let nextPublishIndex = startIndex;
 
- for (let i = startIndex; i < transcriptChunks.length; i += 1) {
-  if (signal.aborted) {
-   onResumeIndexChange?.(i);
-   throw new DOMException("Aborted", "AbortError");
+ const publishCompletedChunks = () => {
+  let didAdvance = false;
+
+  while (chunkResults.has(nextPublishIndex)) {
+    const chunkPairs = chunkResults.get(nextPublishIndex) || [];
+    chunkResults.delete(nextPublishIndex);
+    mergedPairs.push(...chunkPairs);
+    nextPublishIndex += 1;
+    didAdvance = true;
   }
 
-  try {
-   const chunkPairs = await callGeminiChunk({
-    chunk: transcriptChunks[i],
-    index: i,
-    total: transcriptChunks.length,
-    apiKeys,
-    activeKeyIndex: currentActiveKeyIndex,
-    primaryModel,
-    fallbackModel,
-    signal,
-    onStatusChange,
-    onActiveKeyChange: (nextIndex) => {
-     currentActiveKeyIndex = nextIndex;
-     onActiveKeyChange?.(nextIndex);
-    },
-    onPersistActiveKey,
-   });
+  if (!didAdvance) {
+    return;
+  }
 
-   mergedPairs.push(...chunkPairs);
-   const nextPairs = dedupePairs([...mergedPairs], { preserveMarkedDuplicates });
-   onPairsChange?.(nextPairs);
-   onResumeIndexChange?.(i + 1);
-  } catch (error) {
-   const retryAfterSeconds =
-    typeof error === "object" &&
-    error !== null &&
-    "retryAfterSeconds" in error &&
-    typeof (error as { retryAfterSeconds?: unknown }).retryAfterSeconds === "number"
-     ? (error as { retryAfterSeconds: number }).retryAfterSeconds
-     : null;
+  const nextPairs = dedupePairs([...mergedPairs], { preserveMarkedDuplicates });
+  onPairsChange?.(nextPairs);
+  onResumeIndexChange?.(nextPublishIndex);
+ };
 
-   if (retryAfterSeconds && retryAfterSeconds > 0) {
-    onResumeIndexChange?.(i);
+ const remainingChunkCount = transcriptChunks.length - startIndex;
+ const workerCount = Math.max(1, Math.min(concurrency, remainingChunkCount));
+
+ const runNextChunk = async () => {
+  while (nextChunkIndex < transcriptChunks.length) {
+   if (signal.aborted) {
+    onResumeIndexChange?.(nextPublishIndex);
+    throw new DOMException("Aborted", "AbortError");
    }
 
-   throw error;
+   const chunkIndex = nextChunkIndex;
+   nextChunkIndex += 1;
+
+   try {
+    const chunkPairs = await callGeminiChunk({
+     chunk: transcriptChunks[chunkIndex],
+     index: chunkIndex,
+     total: transcriptChunks.length,
+     apiKeys,
+     activeKeyIndex: (currentActiveKeyIndex + (chunkIndex - startIndex)) % apiKeys.length,
+     primaryModel,
+     fallbackModel,
+     contentMode,
+     signal,
+     onStatusChange,
+     onActiveKeyChange: (nextIndex) => {
+      currentActiveKeyIndex = nextIndex;
+      onActiveKeyChange?.(nextIndex);
+     },
+     onPersistActiveKey,
+    });
+
+    chunkResults.set(chunkIndex, chunkPairs);
+    publishCompletedChunks();
+   } catch (error) {
+    const retryAfterSeconds =
+     typeof error === "object" &&
+     error !== null &&
+     "retryAfterSeconds" in error &&
+     typeof (error as { retryAfterSeconds?: unknown }).retryAfterSeconds === "number"
+      ? (error as { retryAfterSeconds: number }).retryAfterSeconds
+      : null;
+
+    if (retryAfterSeconds && retryAfterSeconds > 0) {
+     onResumeIndexChange?.(nextPublishIndex);
+    }
+
+    throw error;
+   }
   }
- }
+ };
+
+ await Promise.all(Array.from({ length: workerCount }, () => runNextChunk()));
 
  return mergedPairs;
 };

@@ -205,7 +205,7 @@ const runWithModelAndKeyFallbackAndRetry = async ({
   }
 
   const currentModel = models[Math.min(modelIndex, models.length - 1)];
-  let lastRetrySeconds: number | null = null;
+  let shortestRetrySeconds: number | null = null;
 
   for (let keyLoop = 0; keyLoop < apiKeys.length; keyLoop += 1) {
    const currentKeyIndex = (activeKeyIndex + keyLoop) % apiKeys.length;
@@ -233,7 +233,7 @@ const runWithModelAndKeyFallbackAndRetry = async ({
 
     if (isRetryableQuotaError(message)) {
      const retrySeconds = extractRetrySeconds(message) ?? getBackoffSeconds(Date.now() - startedAt);
-     lastRetrySeconds = lastRetrySeconds === null ? retrySeconds : Math.max(lastRetrySeconds, retrySeconds);
+     shortestRetrySeconds = shortestRetrySeconds === null ? retrySeconds : Math.min(shortestRetrySeconds, retrySeconds);
 
      if (message.toLowerCase().includes("service unavailable") || message.includes("(503)")) {
       onStatusChange?.(`${Math.ceil(retrySeconds)}초 뒤 서버 응답을 다시 시도합니다`);
@@ -277,7 +277,7 @@ const runWithModelAndKeyFallbackAndRetry = async ({
    continue;
   }
 
-  const retrySeconds = lastRetrySeconds ?? getBackoffSeconds(elapsed);
+  const retrySeconds = shortestRetrySeconds ?? getBackoffSeconds(elapsed);
   onStatusChange?.(`${Math.ceil(retrySeconds)}초 뒤 자동 재시도`);
   await sleep((retrySeconds + 1) * 1000);
  }

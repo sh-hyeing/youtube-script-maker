@@ -2,7 +2,7 @@
 
 import { jsPDF } from "jspdf";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { dedupePairs, processChunks, type ScriptPair } from "@/lib/gemini";
+import { dedupePairs, processChunks, type ContentMode, type ScriptPair } from "@/lib/gemini";
 import { downloadStudyScriptPdf } from "@/lib/pdf";
 import { transcribeAudioWithGemini } from "@/lib/clientGeminiStt";
 
@@ -52,15 +52,58 @@ const isSongLikeContent = (value: string) => {
  return strongSongKeywords.some((keyword) => text.includes(keyword));
 };
 
-const getRunModelConfig = ({ title, fileName, chunkCount }: { title?: string; fileName?: string; chunkCount: number }) => {
+const isConversationLikeContent = (value: string) => {
+ const text = value.toLowerCase();
+ const conversationKeywords = [
+  "interview",
+  "podcast",
+  "conversation",
+  "dialogue",
+  "dialog",
+  "movie",
+  "film",
+  "scene",
+  "drama",
+  "clip",
+  "vlog",
+  "q&a",
+  "qa",
+  "talk",
+ ];
+
+ return conversationKeywords.some((keyword) => text.includes(keyword));
+};
+
+const getRunModelConfig = ({
+ title,
+ fileName,
+ chunkCount,
+ transcriptPreview,
+}: {
+ title?: string;
+ fileName?: string;
+ chunkCount: number;
+ transcriptPreview?: string;
+}) => {
  const sourceText = `${title || ""} ${fileName || ""}`.trim();
  const isSong = isSongLikeContent(sourceText);
+ const isConversation = !isSong && isConversationLikeContent(`${sourceText} ${transcriptPreview || ""}`);
+
+ if (isConversation) {
+  return {
+   primaryModel: FLASH_MODEL,
+   fallbackModel: FLASH_LITE_MODEL,
+   preserveMarkedDuplicates: true,
+   contentMode: "conversation" as ContentMode,
+  };
+ }
 
  if (isSong) {
   return {
    primaryModel: FLASH_MODEL,
    fallbackModel: FLASH_LITE_MODEL,
    preserveMarkedDuplicates: true,
+   contentMode: "song" as ContentMode,
   };
  }
 
@@ -69,6 +112,7 @@ const getRunModelConfig = ({ title, fileName, chunkCount }: { title?: string; fi
    primaryModel: FLASH_LITE_MODEL,
    fallbackModel: FLASH_MODEL,
    preserveMarkedDuplicates: false,
+   contentMode: "learning" as ContentMode,
   };
  }
 
@@ -76,6 +120,7 @@ const getRunModelConfig = ({ title, fileName, chunkCount }: { title?: string; fi
   primaryModel: FLASH_MODEL,
   fallbackModel: FLASH_LITE_MODEL,
   preserveMarkedDuplicates: false,
+  contentMode: "learning" as ContentMode,
  };
 };
 
@@ -86,9 +131,12 @@ const STORAGE_KEY = "gemini_api_keys_v1";
 const STORAGE_ACTIVE_KEY = "gemini_active_key_index_v1";
 const STT_CACHE_PREFIX = "gemini_stt_cache_v1:";
 const RESULT_CACHE_PREFIX = "study_result_cache_v1:";
-const MAX_STT_SEGMENT_CONCURRENCY = 3;
+const RESUME_STATE_PREFIX = "study_resume_state_v1:";
+const MAX_STT_SEGMENT_CONCURRENCY = 1;
+const MAX_TRANSLATION_CHUNK_CONCURRENCY = 1;
+const TRANSCRIPT_CHUNK_MAX_LENGTH = 3600;
 
-const chunkTextByLine = (text: string, maxLength = 2800) => {
+const chunkTextByLine = (text: string, maxLength = TRANSCRIPT_CHUNK_MAX_LENGTH) => {
  if (!text.trim()) return [];
 
  const lines = text.split("\n");
@@ -171,10 +219,29 @@ const normalizeYouTubeProcessingUrl = (value: string) => {
 
 const getSttCacheKey = (videoUrl: string) => `${STT_CACHE_PREFIX}${normalizeYouTubeProcessingUrl(videoUrl)}`;
 const getResultCacheKey = (videoUrl: string) => `${RESULT_CACHE_PREFIX}${normalizeYouTubeProcessingUrl(videoUrl)}`;
+const getResumeStateKey = (videoUrl: string) => `${RESUME_STATE_PREFIX}${normalizeYouTubeProcessingUrl(videoUrl)}`;
+const isContentMode = (value: unknown): value is ContentMode => value === "learning" || value === "song" || value === "conversation";
 
 type CachedStudyResult = {
  originalScript: string;
  pairs: ScriptPair[];
+ savedAt: number;
+};
+
+type CachedResumeState = {
+ originalScript: string;
+ pairs: ScriptPair[];
+ savedTranscriptChunks: string[];
+ resumeIndex: number;
+ chunkCount: number;
+ lastRunVideoUrl: string;
+ isPaused: boolean;
+ selectedModels: {
+  primaryModel: string;
+  fallbackModel: string;
+  preserveMarkedDuplicates: boolean;
+  contentMode: ContentMode;
+ };
  savedAt: number;
 };
 
@@ -196,6 +263,25 @@ const clearCachedSttText = (videoUrl: string) => {
  } catch {}
 };
 
+const normalizePairs = (value: unknown) => {
+ return Array.isArray(value)
+  ? value
+    .map((item: unknown) => {
+     const entry = item && typeof item === "object" ? (item as { en?: unknown; ko?: unknown; keepDuplicate?: unknown }) : {};
+     const en = typeof entry.en === "string" ? entry.en : "";
+     const ko = typeof entry.ko === "string" ? entry.ko : "";
+     const keepDuplicate = entry.keepDuplicate === true;
+
+     if (!en && !ko) {
+      return null;
+     }
+
+     return keepDuplicate ? { en, ko, keepDuplicate: true } : { en, ko };
+    })
+    .filter(Boolean) as ScriptPair[]
+  : [];
+};
+
 const readCachedStudyResult = (videoUrl: string): CachedStudyResult | null => {
  try {
   const raw = localStorage.getItem(getResultCacheKey(videoUrl));
@@ -203,22 +289,7 @@ const readCachedStudyResult = (videoUrl: string): CachedStudyResult | null => {
 
   const parsed = JSON.parse(raw);
   const originalScript = typeof parsed?.originalScript === "string" ? parsed.originalScript : "";
-  const pairs = Array.isArray(parsed?.pairs)
-   ? parsed.pairs
-     .map((item: unknown) => {
-      const entry = item && typeof item === "object" ? (item as { en?: unknown; ko?: unknown; keepDuplicate?: unknown }) : {};
-      const en = typeof entry.en === "string" ? entry.en : "";
-      const ko = typeof entry.ko === "string" ? entry.ko : "";
-      const keepDuplicate = entry.keepDuplicate === true;
-
-      if (!en && !ko) {
-       return null;
-      }
-
-      return keepDuplicate ? { en, ko, keepDuplicate: true } : { en, ko };
-     })
-     .filter(Boolean) as ScriptPair[]
-   : [];
+  const pairs = normalizePairs(parsed?.pairs);
 
   if (!originalScript.trim() && pairs.length === 0) {
    return null;
@@ -250,6 +321,82 @@ const writeCachedStudyResult = (videoUrl: string, originalScript: string, pairs:
 const removeCachedStudyResult = (videoUrl: string) => {
  try {
   localStorage.removeItem(getResultCacheKey(videoUrl));
+ } catch {}
+};
+
+const readCachedResumeState = (videoUrl: string): CachedResumeState | null => {
+ try {
+  const raw = localStorage.getItem(getResumeStateKey(videoUrl));
+  if (!raw) return null;
+
+  const parsed = JSON.parse(raw);
+  const lastRunVideoUrl = typeof parsed?.lastRunVideoUrl === "string" ? parsed.lastRunVideoUrl : "";
+  const savedTranscriptChunks = Array.isArray(parsed?.savedTranscriptChunks)
+   ? parsed.savedTranscriptChunks.map((item: unknown) => (typeof item === "string" ? item : "")).filter(Boolean)
+   : [];
+  const resumeIndex = typeof parsed?.resumeIndex === "number" && Number.isFinite(parsed.resumeIndex) ? parsed.resumeIndex : 0;
+  const chunkCount =
+   typeof parsed?.chunkCount === "number" && Number.isFinite(parsed.chunkCount) ? parsed.chunkCount : savedTranscriptChunks.length;
+  const originalScript = typeof parsed?.originalScript === "string" ? parsed.originalScript : "";
+  const pairs = normalizePairs(parsed?.pairs);
+  const selectedModels: CachedResumeState["selectedModels"] =
+   parsed?.selectedModels && typeof parsed.selectedModels === "object"
+    ? {
+       primaryModel:
+        typeof (parsed.selectedModels as { primaryModel?: unknown }).primaryModel === "string"
+         ? (parsed.selectedModels as { primaryModel: string }).primaryModel
+         : FLASH_MODEL,
+       fallbackModel:
+       typeof (parsed.selectedModels as { fallbackModel?: unknown }).fallbackModel === "string"
+         ? (parsed.selectedModels as { fallbackModel: string }).fallbackModel
+         : FLASH_LITE_MODEL,
+       preserveMarkedDuplicates: (parsed.selectedModels as { preserveMarkedDuplicates?: unknown }).preserveMarkedDuplicates === true,
+       contentMode: isContentMode((parsed.selectedModels as { contentMode?: unknown }).contentMode)
+        ? (parsed.selectedModels as { contentMode: ContentMode }).contentMode
+        : "learning",
+      }
+    : {
+       primaryModel: FLASH_MODEL,
+       fallbackModel: FLASH_LITE_MODEL,
+       preserveMarkedDuplicates: false,
+       contentMode: "learning",
+      };
+
+  if (!lastRunVideoUrl.trim() || savedTranscriptChunks.length === 0) {
+   return null;
+  }
+
+  return {
+   originalScript,
+   pairs,
+   savedTranscriptChunks,
+   resumeIndex: Math.max(0, Math.min(resumeIndex, savedTranscriptChunks.length)),
+   chunkCount: Math.max(chunkCount, savedTranscriptChunks.length),
+   lastRunVideoUrl,
+   isPaused: parsed?.isPaused === true,
+   selectedModels,
+   savedAt: typeof parsed?.savedAt === "number" ? parsed.savedAt : 0,
+  };
+ } catch {
+  return null;
+ }
+};
+
+const writeCachedResumeState = (videoUrl: string, state: Omit<CachedResumeState, "savedAt">) => {
+ try {
+  localStorage.setItem(
+   getResumeStateKey(videoUrl),
+   JSON.stringify({
+    ...state,
+    savedAt: Date.now(),
+   }),
+  );
+ } catch {}
+};
+
+const removeCachedResumeState = (videoUrl: string) => {
+ try {
+  localStorage.removeItem(getResumeStateKey(videoUrl));
  } catch {}
 };
 
@@ -311,11 +458,24 @@ export default function Page() {
  const cooldownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
  const resumeRequestedRef = useRef(false);
  const lastCachedResultUrlRef = useRef("");
- const selectedModelsRef = useRef({
-  primaryModel: FLASH_MODEL,
-  fallbackModel: FLASH_LITE_MODEL,
-  preserveMarkedDuplicates: false,
- });
+const selectedModelsRef = useRef({
+ primaryModel: FLASH_MODEL,
+ fallbackModel: FLASH_LITE_MODEL,
+ preserveMarkedDuplicates: false,
+ contentMode: "learning" as ContentMode,
+});
+
+ const applyResumeState = (resumeState: CachedResumeState) => {
+  setErrorMessage("");
+  setOriginalScript(resumeState.originalScript);
+  setPairs(resumeState.pairs);
+  setChunkCount(resumeState.chunkCount);
+  setSavedTranscriptChunks(resumeState.savedTranscriptChunks);
+  setResumeIndex(resumeState.resumeIndex);
+  setIsPaused(resumeState.isPaused || resumeState.resumeIndex < resumeState.savedTranscriptChunks.length);
+  setLastRunVideoUrl(resumeState.lastRunVideoUrl);
+  selectedModelsRef.current = resumeState.selectedModels;
+ };
 
  useEffect(() => {
   const savedKeys = localStorage.getItem(STORAGE_KEY);
@@ -358,13 +518,21 @@ export default function Page() {
 
   lastCachedResultUrlRef.current = normalizedUrl;
 
+  const cachedResumeState = readCachedResumeState(normalizedUrl);
+
+  if (cachedResumeState && cachedResumeState.resumeIndex < cachedResumeState.savedTranscriptChunks.length) {
+   applyResumeState(cachedResumeState);
+   setStatusText("이어할 작업을 불러왔어요.");
+   return;
+  }
+
   const cachedResult = readCachedStudyResult(normalizedUrl);
 
   if (!cachedResult) {
    return;
   }
 
-  const cachedChunks = chunkTextByLine(cachedResult.originalScript, 2800);
+  const cachedChunks = chunkTextByLine(cachedResult.originalScript, TRANSCRIPT_CHUNK_MAX_LENGTH);
   setErrorMessage("");
   setOriginalScript(cachedResult.originalScript);
   setPairs(cachedResult.pairs);
@@ -373,8 +541,47 @@ export default function Page() {
   setResumeIndex(cachedChunks.length);
   setIsPaused(false);
   setLastRunVideoUrl(normalizedUrl);
+  removeCachedResumeState(normalizedUrl);
   setStatusText("저장된 결과 불러옴");
  }, [videoUrl, loadingTranscript, loadingGemini, isCooldownWaiting]);
+
+ useEffect(() => {
+  if (!lastRunVideoUrl.trim()) {
+   return;
+  }
+
+  if (savedTranscriptChunks.length === 0) {
+   removeCachedResumeState(lastRunVideoUrl);
+   return;
+  }
+
+  if (!isPaused && !loadingTranscript && !loadingGemini && resumeIndex >= savedTranscriptChunks.length) {
+   removeCachedResumeState(lastRunVideoUrl);
+   return;
+  }
+
+  writeCachedResumeState(lastRunVideoUrl, {
+   originalScript,
+   pairs,
+   savedTranscriptChunks,
+   resumeIndex,
+   chunkCount,
+   lastRunVideoUrl,
+   isPaused: isPaused || isCooldownWaiting || loadingTranscript || loadingGemini,
+   selectedModels: selectedModelsRef.current,
+  });
+ }, [
+  chunkCount,
+  isCooldownWaiting,
+  isPaused,
+  lastRunVideoUrl,
+  loadingGemini,
+  loadingTranscript,
+  originalScript,
+  pairs,
+  resumeIndex,
+  savedTranscriptChunks,
+ ]);
 
  useEffect(() => {
   if (apiKeys.length === 0) {
@@ -576,7 +783,7 @@ export default function Page() {
     const data = jobData.result;
     const needsClientStt = data.needsClientStt === true;
     const transcriptText = typeof data.transcript === "string" ? data.transcript : typeof data.text === "string" ? data.text : "";
-    const transcriptChunks = needsClientStt ? [] : chunkTextByLine(transcriptText, 2800);
+     const transcriptChunks = needsClientStt ? [] : chunkTextByLine(transcriptText, TRANSCRIPT_CHUNK_MAX_LENGTH);
 
      return {
       normalizedUrl: normalizedProcessingUrl,
@@ -659,6 +866,7 @@ export default function Page() {
   setResumeIndex(0);
   setIsPaused(false);
   setLastRunVideoUrl(normalizedProcessingUrl);
+  removeCachedResumeState(normalizedProcessingUrl);
   clearCachedSttText(videoUrl);
 
   try {
@@ -696,7 +904,7 @@ export default function Page() {
       }
 
       publishedText = nextText;
-      const partialChunks = chunkTextByLine(nextText, 2800);
+       const partialChunks = chunkTextByLine(nextText, TRANSCRIPT_CHUNK_MAX_LENGTH);
       setOriginalScript(nextText);
       setChunkCount(partialChunks.length);
       setSavedTranscriptChunks(partialChunks);
@@ -739,7 +947,7 @@ export default function Page() {
      await Promise.all(Array.from({ length: sttSegmentConcurrency }, () => runNextSegment()));
 
      finalTranscriptText = sttParts.join("\n").trim();
-     finalTranscriptChunks = chunkTextByLine(finalTranscriptText, 2800);
+      finalTranscriptChunks = chunkTextByLine(finalTranscriptText, TRANSCRIPT_CHUNK_MAX_LENGTH);
      writeCachedSttText(videoUrl, finalTranscriptText);
     } else if (!transcriptData.audioUrl) {
      throw new Error("음성 인식용 오디오 주소를 받지 못했습니다.");
@@ -760,7 +968,7 @@ export default function Page() {
      });
 
      finalTranscriptText = sttText;
-     finalTranscriptChunks = chunkTextByLine(sttText, 2800);
+      finalTranscriptChunks = chunkTextByLine(sttText, TRANSCRIPT_CHUNK_MAX_LENGTH);
      writeCachedSttText(videoUrl, sttText);
     }
    }
@@ -784,6 +992,7 @@ export default function Page() {
     title: transcriptData.title,
     fileName: transcriptData.fileName,
     chunkCount: finalTranscriptChunks.length,
+    transcriptPreview: finalTranscriptText.slice(0, 1200),
    });
 
    selectedModelsRef.current = selectedModels;
@@ -800,6 +1009,7 @@ export default function Page() {
     primaryModel: selectedModels.primaryModel,
     fallbackModel: selectedModels.fallbackModel,
     preserveMarkedDuplicates: selectedModels.preserveMarkedDuplicates,
+    contentMode: selectedModels.contentMode,
     onStatusChange: setStatusText,
     onActiveKeyChange: setActiveKeyIndex,
     onPersistActiveKey: (index) => {
@@ -807,6 +1017,7 @@ export default function Page() {
     },
     onPairsChange: setPairs,
     onResumeIndexChange: setResumeIndex,
+    concurrency: Math.min(apiKeys.length, MAX_TRANSLATION_CHUNK_CONCURRENCY, finalTranscriptChunks.length),
    });
 
    const finalPairs = dedupePairs(mergedPairs, { preserveMarkedDuplicates: selectedModels.preserveMarkedDuplicates });
@@ -814,6 +1025,7 @@ export default function Page() {
    setResumeIndex(finalTranscriptChunks.length);
    setIsPaused(false);
    writeCachedStudyResult(videoUrl, finalTranscriptText, finalPairs);
+   removeCachedResumeState(videoUrl);
    setStatusText("완료");
   } catch (error) {
    const retryAfterSeconds =
@@ -831,6 +1043,7 @@ export default function Page() {
     resumeRequestedRef.current = true;
     startCooldownAndResume(retryAfterSeconds + 1);
    } else {
+    setIsPaused(true);
     const message = error instanceof Error ? error.message : "알 수 없는 오류가 발생했습니다.";
     setErrorMessage(message);
     setStatusText("오류");
@@ -843,12 +1056,28 @@ export default function Page() {
  };
 
  const resumeRun = async (automatic = false) => {
-  if (savedTranscriptChunks.length === 0) {
+  const normalizedProcessingUrl = normalizeYouTubeProcessingUrl(videoUrl);
+  let resumeChunks = savedTranscriptChunks;
+  let nextResumeIndex = resumeIndex;
+  let initialPairs = pairs;
+
+  if (resumeChunks.length === 0) {
+   const cachedResumeState = readCachedResumeState(normalizedProcessingUrl);
+
+   if (cachedResumeState) {
+    applyResumeState(cachedResumeState);
+    resumeChunks = cachedResumeState.savedTranscriptChunks;
+    nextResumeIndex = cachedResumeState.resumeIndex;
+    initialPairs = cachedResumeState.pairs;
+   }
+  }
+
+  if (resumeChunks.length === 0) {
    setErrorMessage("이어할 데이터가 없습니다.");
    return;
   }
 
-  if (resumeIndex >= savedTranscriptChunks.length) {
+  if (nextResumeIndex >= resumeChunks.length) {
    setErrorMessage("이미 모든 청크 처리가 끝났습니다.");
    return;
   }
@@ -868,15 +1097,16 @@ export default function Page() {
    setStatusText(automatic ? "자동 이어하는 중" : "이어하는 중");
 
    const mergedPairs = await processChunks({
-    transcriptChunks: savedTranscriptChunks,
-    startIndex: resumeIndex,
-    initialPairs: pairs,
+    transcriptChunks: resumeChunks,
+    startIndex: nextResumeIndex,
+    initialPairs,
     signal: controller.signal,
     apiKeys,
     activeKeyIndex,
     primaryModel: selectedModelsRef.current.primaryModel,
     fallbackModel: selectedModelsRef.current.fallbackModel,
     preserveMarkedDuplicates: selectedModelsRef.current.preserveMarkedDuplicates,
+    contentMode: selectedModelsRef.current.contentMode,
     onStatusChange: setStatusText,
     onActiveKeyChange: setActiveKeyIndex,
     onPersistActiveKey: (index) => {
@@ -884,13 +1114,15 @@ export default function Page() {
     },
     onPairsChange: setPairs,
     onResumeIndexChange: setResumeIndex,
+    concurrency: Math.min(apiKeys.length, MAX_TRANSLATION_CHUNK_CONCURRENCY, resumeChunks.length - nextResumeIndex),
    });
 
    const finalPairs = dedupePairs(mergedPairs, { preserveMarkedDuplicates: selectedModelsRef.current.preserveMarkedDuplicates });
    setPairs(finalPairs);
-   setResumeIndex(savedTranscriptChunks.length);
+   setResumeIndex(resumeChunks.length);
    setIsPaused(false);
    writeCachedStudyResult(videoUrl, originalScript, finalPairs);
+   removeCachedResumeState(videoUrl);
    setStatusText("완료");
   } catch (error) {
    const retryAfterSeconds =
@@ -1009,6 +1241,12 @@ export default function Page() {
           <button type="button" className="studio-btn" onClick={handleMainAction} disabled={!isBusy && !canRun}>
            {mainButtonLabel}
           </button>
+
+          {canResume && !isBusy ? (
+           <button type="button" className="studio-btn studio-btn-secondary" onClick={startFreshRun}>
+            처음부터 다시 만들기
+           </button>
+          ) : null}
          </div>
         ) : null}
        </section>
